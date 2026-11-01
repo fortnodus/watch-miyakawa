@@ -12,22 +12,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Restore Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: pw-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-
-      - run: pip install -r requirements.txt && playwright install --with-deps chromium
 
       # 前回の状態（どの日が空有りだったか）を引き継ぐ
       - name: Restore state
@@ -37,15 +24,11 @@ jobs:
           key: state-${{ github.run_id }}
           restore-keys: state-
 
+      # ubuntu-latest には Python が最初から入っているので、追加インストールは不要
       - name: Check calendar
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
-          DEBUG: "1"
-        run: python watch.py
+        run: python3 watch.py
 
       - name: Save state
         if: always()
@@ -53,11 +36,3 @@ jobs:
         with:
           path: state.json
           key: state-${{ github.run_id }}
-
-      - name: Upload debug screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug
-          path: debug/
-          retention-days: 2
