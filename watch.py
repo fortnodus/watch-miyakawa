@@ -61,6 +61,7 @@ FIND_CAL_JS = r"""
   clickable.sort((a, b) => (b.r.left - a.r.left) || (a.r.width * a.r.height - b.r.width * b.r.height));
   const nx = clickable[0];
   window.__miyaCal = cal;
+  window.__miyaNext = nx ? nx.e : null;
   return {
     box: {x: cb.left + scrollX, y: cb.top + scrollY, w: cb.width, h: cb.height},
     legend: rel(lg.getBoundingClientRect()),
@@ -128,10 +129,22 @@ async def scan_view(page, scale, tag):
     info = await page.evaluate(FIND_CAL_JS)
     if not info:
         raise RuntimeError("カレンダー要素が見つかりません (サイト構造が変わった可能性)")
+    # 固定ヘッダー等がカレンダーに被らないよう、fixed/sticky 要素を一時的に隠す
+    await page.evaluate("""() => {
+      const cal = document.querySelector('[data-miya-cal]');
+      for (const e of document.querySelectorAll('body *')) {
+        const p = getComputedStyle(e).position;
+        if ((p === 'fixed' || p === 'sticky') && !cal.contains(e) && !e.contains(cal)) {
+          e.dataset.miyaHidden = '1'; e.style.visibility = 'hidden';
+        }
+      }
+    }""")
     await page.wait_for_timeout(500)
     # 要素そのものを撮る (はみ出し・スクロール位置は Playwright が処理)
     png = await page.locator('[data-miya-cal="1"]').first.screenshot()
     img = Image.open(io.BytesIO(png))
+    await page.evaluate("""() => document.querySelectorAll('[data-miya-hidden]')
+        .forEach(e => { e.style.visibility = ''; delete e.dataset.miyaHidden; })""")
     if DEBUG:
         print(f"[{tag}] calendar box={info['box']} image={img.size}")
     if DEBUG:
@@ -176,14 +189,30 @@ async def _scan_all(page):
     m1, d1, info = await scan_view(page, 2, "view1")
     results[m1] = d1
     if info["next"]:
-        # 矢印の座標は scan_view 内のスクロール後の値なので、同じ位置に戻してからクリック
-        await page.evaluate("document.querySelector('[data-miya-cal]').scrollIntoView({block:'start'})")
-        info2 = await page.evaluate(FIND_CAL_JS)
-        nx = (info2 or info)["next"]
-        await page.mouse.click(nx["x"], nx["y"])
-        await page.wait_for_timeout(1500)
-        m2, d2, _ = await scan_view(page, 2, "view2")
-        if m2 and m2 != m1:
+        switched = False
+        # 方法1: 要素を JS で直接クリック / 方法2: 画面中央へスクロールして座標クリック / 方法3: 親要素をクリック
+        for how in ("js", "mouse", "parent"):
+            info2 = await page.evaluate(FIND_CAL_JS)
+            if not info2 or not info2["next"]:
+                break
+            if how == "js":
+                await page.evaluate("window.__miyaNext.dispatchEvent(new MouseEvent('click', {bubbles: true}))")
+            elif how == "mouse":
+                await page.evaluate("window.__miyaNext.scrollIntoView({block: 'center'})")
+                pos = await page.evaluate("(() => {const r = window.__miyaNext.getBoundingClientRect();"
+                                          " return {x: r.left + r.width / 2, y: r.top + r.height / 2}})()")
+                await page.mouse.click(pos["x"], pos["y"])
+            else:
+                await page.evaluate("window.__miyaNext.parentElement.click()")
+            await page.wait_for_timeout(1500)
+            text = await page.evaluate("document.querySelector('[data-miya-cal]').innerText")
+            if parse_month(text) not in (None, m1):
+                switched = True
+                if DEBUG:
+                    print(f"翌月へ切替成功 (方法: {how})")
+                break
+        if switched:
+            m2, d2, _ = await scan_view(page, 2, "view2")
             results[m2] = d2
         elif DEBUG:
             print("翌月への切替を確認できませんでした (矢印の位置要確認)")
