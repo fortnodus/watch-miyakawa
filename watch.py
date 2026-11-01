@@ -44,7 +44,9 @@ FIND_CAL_JS = r"""
   let cal = legend.parentElement;
   while (cal && dayEls(cal).length < 28) cal = cal.parentElement;
   if (!cal) return null;
-  cal.scrollIntoView({block: 'center'});
+  document.querySelectorAll('[data-miya-cal]').forEach(e => e.removeAttribute('data-miya-cal'));
+  cal.setAttribute('data-miya-cal', '1');
+  cal.scrollIntoView({block: 'start'});
   const cb = cal.getBoundingClientRect();
   const rel = r => ({x: r.left - cb.left, y: r.top - cb.top, w: r.width, h: r.height});
   const days = dayEls(cal).map(e => ({d: +e.textContent.trim(), ...rel(e.getBoundingClientRect())}));
@@ -127,9 +129,11 @@ async def scan_view(page, scale, tag):
     if not info:
         raise RuntimeError("カレンダー要素が見つかりません (サイト構造が変わった可能性)")
     await page.wait_for_timeout(500)
-    b = info["box"]
-    png = await page.screenshot(clip={"x": b["x"], "y": b["y"], "width": b["w"], "height": b["h"]})
+    # 要素そのものを撮る (はみ出し・スクロール位置は Playwright が処理)
+    png = await page.locator('[data-miya-cal="1"]').first.screenshot()
     img = Image.open(io.BytesIO(png))
+    if DEBUG:
+        print(f"[{tag}] calendar box={info['box']} image={img.size}")
     if DEBUG:
         Path("debug").mkdir(exist_ok=True)
         img.save(f"debug/{tag}.png")
@@ -155,18 +159,34 @@ async def check():
         await page.goto(URL, wait_until="networkidle", timeout=60000)
         await page.wait_for_timeout(1500)
 
-        results = {}
-        m1, d1, info = await scan_view(page, 2, "view1")
-        results[m1] = d1
-        if info["next"]:
-            await page.mouse.click(info["next"]["x"], info["next"]["y"])
-            await page.wait_for_timeout(1500)
-            m2, d2, _ = await scan_view(page, 2, "view2")
-            if m2 and m2 != m1:
-                results[m2] = d2
-            elif DEBUG:
-                print("翌月への切替を確認できませんでした (矢印の位置要確認)")
-        await browser.close()
+        try:
+            return await _scan_all(page)
+        except Exception:
+            # 失敗時はページ全体を残して原因調査できるようにする
+            Path("debug").mkdir(exist_ok=True)
+            await page.screenshot(path="debug/fail_fullpage.png", full_page=True)
+            Path("debug/fail_page.html").write_text(await page.content(), encoding="utf-8")
+            raise
+        finally:
+            await browser.close()
+
+
+async def _scan_all(page):
+    results = {}
+    m1, d1, info = await scan_view(page, 2, "view1")
+    results[m1] = d1
+    if info["next"]:
+        # 矢印の座標は scan_view 内のスクロール後の値なので、同じ位置に戻してからクリック
+        await page.evaluate("document.querySelector('[data-miya-cal]').scrollIntoView({block:'start'})")
+        info2 = await page.evaluate(FIND_CAL_JS)
+        nx = (info2 or info)["next"]
+        await page.mouse.click(nx["x"], nx["y"])
+        await page.wait_for_timeout(1500)
+        m2, d2, _ = await scan_view(page, 2, "view2")
+        if m2 and m2 != m1:
+            results[m2] = d2
+        elif DEBUG:
+            print("翌月への切替を確認できませんでした (矢印の位置要確認)")
 
     today = dt.datetime.now(JST).date()
     dates = set()
